@@ -127,6 +127,30 @@ export function randomBytes (size: number): Buffer {
 }
 
 /**
+ * Constant-time buffer comparison.
+ * Falls back to Node.js crypto.timingSafeEqual if no custom provider is set.
+ * In React Native, a pure-JS constant-time comparison is used as fallback.
+ */
+export function timingSafeEqual (a: Buffer, b: Buffer): boolean {
+    if (a.length !== b.length) {
+        return false
+    }
+
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const crypto = require('crypto')
+        return crypto.timingSafeEqual(a, b)
+    } catch {
+        // Pure-JS constant-time comparison for React Native
+        let result = 0
+        for (let i = 0; i < a.length; i++) {
+            result |= a[i] ^ b[i]
+        }
+        return result === 0
+    }
+}
+
+/**
  * Check if an address string is an IPv6 address.
  * Replaces dependency on `net.isIPv6()` for React Native compatibility.
  */

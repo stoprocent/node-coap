@@ -10,6 +10,7 @@ import { EventEmitter } from 'events'
 import { parse } from 'coap-packet'
 import { parameters } from './parameters'
 import type { CoapSocket } from './platform'
+import { Parameters } from '../models/models'
 
 class RetrySendError extends Error {
     retransmitTimeout: number
@@ -31,19 +32,22 @@ export default class RetrySend extends EventEmitter {
     _message: Buffer
     _timer: NodeJS.Timeout
     _bOffTimer: NodeJS.Timeout
-    constructor (sock: any, port: number, host?: string, maxRetransmit?: number) {
+    _parameters: Parameters
+    constructor (sock: any, port: number, host?: string, maxRetransmit?: number, instanceParameters?: Parameters) {
         super()
+
+        this._parameters = instanceParameters ?? parameters
 
         this._sock = sock
 
-        this._port = port ?? parameters.coapPort
+        this._port = port ?? this._parameters.coapPort
 
         this._host = host
 
-        this._maxRetransmit = maxRetransmit ?? parameters.maxRetransmit
+        this._maxRetransmit = maxRetransmit ?? this._parameters.maxRetransmit
         this._sendAttemp = 0
         this._lastMessageId = -1
-        this._currentTime = parameters.ackTimeout * (1 + (parameters.ackRandomFactor - 1) * Math.random()) * 1000
+        this._currentTime = this._parameters.ackTimeout * (1 + (this._parameters.ackRandomFactor - 1) * Math.random()) * 1000
 
         this._bOff = () => {
             this._currentTime = this._currentTime * 2
@@ -77,7 +81,7 @@ export default class RetrySend extends EventEmitter {
         this._message = message
         this._send(avoidBackoff)
 
-        const timeout = avoidBackoff === true ? parameters.maxRTT : parameters.exchangeLifetime
+        const timeout = avoidBackoff === true ? this._parameters.maxRTT : this._parameters.exchangeLifetime
         this._timer = setTimeout(() => {
             const err = new RetrySendError(timeout)
             if (avoidBackoff === false) {

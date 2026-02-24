@@ -8,10 +8,12 @@
 
 import { CoapMethod, OptionName, Packet, ParsedPacket } from 'coap-packet'
 import type { CoapSocket } from '../lib/platform'
+import type { OSCORE } from 'coap-oscore'
 import Agent from '../lib/agent'
 import IncomingMessage from '../lib/incoming_message'
 import OutgoingMessage from '../lib/outgoing_message'
 import CoAPServer from '../lib/server'
+import type { SecurityContextManager } from '../lib/oscore'
 
 /**
  * Portable AddressInfo interface.
@@ -46,6 +48,10 @@ export interface MiddlewareParameters {
     server: CoAPServer
     packet?: ParsedPacket
     proxy?: string
+    oscoreContext?: OSCORE
+    wasOscoreProtected?: boolean
+    oscoreSenderId?: Buffer
+    oscoreIdContext?: Buffer
 }
 
 export interface CoapPacket extends Packet {
@@ -123,10 +129,15 @@ export interface CoapServerOptions {
     clientIdentifier?: (request: IncomingMessage) => string
     reuseAddr?: boolean
     cacheSize?: number
+    oscoreContexts?: SecurityContextManager
+    oscoreOnly?: boolean
+    parameters?: ParametersUpdate
 }
 
 export interface AgentOptions {
     type?: 'udp4' | 'udp6'
     socket?: CoapSocket
     port?: number
+    oscoreOnly?: boolean
+    parameters?: ParametersUpdate
 }

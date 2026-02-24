@@ -7,7 +7,7 @@
  */
 
 import { EventEmitter } from 'events'
-import { type CoapServerOptions, type requestListener, type CoapPacket, type Block, type MiddlewareParameters, type AddressInfo } from '../models/models'
+import { type CoapServerOptions, type requestListener, type CoapPacket, type Block, type MiddlewareParameters, type AddressInfo, type Parameters } from '../models/models'
 import BlockCache from './cache'
 import OutgoingMessage from './outgoing_message'
 import { type CoapSocket, createCoapSocket, isIPv6, getNetworkAddresses } from './platform'
@@ -15,11 +15,13 @@ import { LRUCache } from 'lru-cache'
 import IncomingMessage from './incoming_message'
 import ObserveStream from './observe_write_stream'
 import RetrySend from './retry_send'
-import { handleProxyResponse, handleServerRequest, parseRequest, proxyRequest } from './middlewares'
+import { handleProxyResponse, handleServerRequest, parseRequest, proxyRequest, oscoreDecryptRequest } from './middlewares'
+import { SecurityContextManager } from './oscore'
+import type { OSCORE } from 'coap-oscore'
 import { parseBlockOption } from './block'
 import { generate, type NamedOption, type Option, type ParsedPacket } from 'coap-packet'
 import { parseBlock2, createBlock2, getOption, isNumeric, isBoolean } from './helpers'
-import { parameters } from './parameters'
+import { parameters, createParameters } from './parameters'
 import series from 'fastseries'
 import Debug from 'debug'
 const debug = Debug('CoAP Server')
@@ -85,6 +87,10 @@ class CoAPServer extends EventEmitter {
     _sock: CoapSocket | EventEmitter | null
     _internal_socket: boolean
     _clientIdentifier: (request: IncomingMessage) => string
+    _oscoreContextManager: SecurityContextManager | null = null
+    _oscoreOnly: boolean = false
+    _parameters: Parameters
+    private _maxBlock2: number
 
     constructor (serverOptions?: CoapServerOptions | typeof requestListener, listener?: typeof requestListener) {
         super()
@@ -96,6 +102,8 @@ class CoAPServer extends EventEmitter {
         } else if (serverOptions != null) {
             this._options = serverOptions
         }
+
+        this._parameters = createParameters(this._options.parameters)
 
         this._middlewares = [parseRequest]
 
@@ -116,13 +124,20 @@ class CoAPServer extends EventEmitter {
             (this._options.piggybackReplyMs == null) ||
             !isNumeric(this._options.piggybackReplyMs)
         ) {
-            this._options.piggybackReplyMs = parameters.piggybackReplyMs
+            this._options.piggybackReplyMs = this._parameters.piggybackReplyMs
         }
 
         if (!isBoolean(this._options.sendAcksForNonConfirmablePackets)) {
             this._options.sendAcksForNonConfirmablePackets =
-                parameters.sendAcksForNonConfirmablePackets
+                this._parameters.sendAcksForNonConfirmablePackets
         }
+
+        if (this._options.oscoreContexts != null) {
+            this._oscoreContextManager = this._options.oscoreContexts
+            this._oscoreOnly = this._options.oscoreOnly ?? false
+            this._middlewares.push(oscoreDecryptRequest)
+        }
+
         this._middlewares.push(handleServerRequest)
 
         // Multicast settings
@@ -148,7 +163,7 @@ class CoAPServer extends EventEmitter {
             sizeCalculation: (n, key) => {
                 return n.buffer.byteLength
             },
-            ttl: parameters.exchangeLifetime * 1000,
+            ttl: this._parameters.exchangeLifetime * 1000,
             dispose: (value, key) => {
                 if (value.sender != null) {
                     value.sender.reset()
@@ -159,17 +174,24 @@ class CoAPServer extends EventEmitter {
         this._series = series()
 
         this._block1Cache = new BlockCache(
-            parameters.exchangeLifetime * 1000,
+            this._parameters.exchangeLifetime * 1000,
             () => {
                 return {}
             }
         )
         this._block2Cache = new BlockCache(
-            parameters.exchangeLifetime * 1000,
+            this._parameters.exchangeLifetime * 1000,
             () => {
                 return null
             }
         )
+
+        // Compute max block2 size from parameters
+        this._maxBlock2 = 1024
+        if (this._parameters.maxPayloadSize < 1024) {
+            const exponent = Math.floor(Math.log2(this._parameters.maxPayloadSize))
+            this._maxBlock2 = Math.pow(2, exponent)
+        }
 
         if (listener != null) {
             this.on('request', listener)
@@ -201,10 +223,10 @@ class CoAPServer extends EventEmitter {
             payload,
             messageId: packet != null ? packet.messageId : undefined,
             token: packet != null ? packet.token : undefined
-        }, parameters.maxMessageSize)
+        }, this._parameters.maxMessageSize)
 
         if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
-            (this._sock as CoapSocket).send(message, 0, message.length, rsinfo.port)
+            (this._sock as CoapSocket).send(message, 0, message.length, rsinfo.port, rsinfo.address)
         }
     }
 
@@ -212,7 +234,7 @@ class CoAPServer extends EventEmitter {
         const url = new URL(proxyUri)
         const host = url.hostname
         const port = parseInt(url.port)
-        const message = generate(removeProxyOptions(packet), parameters.maxMessageSize)
+        const message = generate(removeProxyOptions(packet), this._parameters.maxMessageSize)
 
         if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
             (this._sock as CoapSocket).send(message, 0, message.length, port, host, callback)
@@ -222,7 +244,7 @@ class CoAPServer extends EventEmitter {
     _sendReverseProxied (packet: ParsedPacket, rsinfo: AddressInfo, callback?: (error: Error | null, bytes: number) => void): void {
         const host = rsinfo.address
         const port = rsinfo.port
-        const message = generate(packet, parameters.maxMessageSize)
+        const message = generate(packet, this._parameters.maxMessageSize)
 
         if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
             (this._sock as CoapSocket).send(message, 0, message.length, port, host, callback)
@@ -290,10 +312,10 @@ class CoAPServer extends EventEmitter {
     }
 
     listen (portOrCallback?: number | EventEmitter | ((err?: Error) => void), addressOrCallback?: string | ((err?: Error) => void), done?: (err?: Error) => void): this {
-        let port = parameters.coapPort
+        let port = this._parameters.coapPort
         if (typeof portOrCallback === 'function') {
             done = portOrCallback
-            port = parameters.coapPort
+            port = this._parameters.coapPort
         } else if (typeof portOrCallback === 'number') {
             port = portOrCallback
         }
@@ -343,11 +365,11 @@ class CoAPServer extends EventEmitter {
             this.emit('error', error)
         })
 
-        if (parameters.pruneTimerPeriod != null) {
+        if (this._parameters.pruneTimerPeriod != null) {
             // Start LRU pruning timer
             this._lru.pruneTimer = setInterval(() => {
                 this._lru.purgeStale()
-            }, parameters.pruneTimerPeriod * 1000)
+            }, this._parameters.pruneTimerPeriod * 1000)
             if (this._lru.pruneTimer.unref != null) {
                 this._lru.pruneTimer.unref()
             }
@@ -387,7 +409,13 @@ class CoAPServer extends EventEmitter {
      * @param packet The packet that was sent from the client.
      * @param rsinfo Connection info
      */
-    _handle (packet: CoapPacket, rsinfo: AddressInfo): void {
+    _handle (
+        packet: CoapPacket,
+        rsinfo: AddressInfo,
+        oscoreProtected: boolean = false,
+        oscoreSenderId?: Buffer,
+        oscoreIdContext?: Buffer
+    ): void {
         if (packet.code == null || packet.code[0] !== '0') {
             // According to RFC7252 Section 4.2 receiving a confirmable messages
             // that can't be processed, should be rejected by ignoring it AND
@@ -402,6 +430,13 @@ class CoAPServer extends EventEmitter {
         const lru = this._lru
         let Message: typeof ObserveStream | typeof OutMessage = OutMessage
         const request = new IncomingMessage(packet, rsinfo)
+
+        if (oscoreProtected && oscoreSenderId != null) {
+            request.oscoreContext = {
+                senderId: oscoreSenderId,
+                idContext: oscoreIdContext
+            }
+        }
         const cached = lru.peek(this._toKey(request, packet, true))
 
         if (cached != null && !(packet.ack ?? false) && !(packet.reset ?? false) && sock != null && typeof (sock as CoapSocket).send === 'function') {
@@ -410,6 +445,10 @@ class CoAPServer extends EventEmitter {
         } else if (cached != null && ((packet.ack ?? false) || (packet.reset ?? false))) {
             if (cached.response != null && (packet.reset ?? false)) {
                 cached.response.end()
+            }
+            // Stop retransmissions when ACK/RST is received
+            if (cached.sender != null) {
+                cached.sender.reset()
             }
             lru.delete(this._toKey(request, packet, false))
             return
@@ -444,54 +483,61 @@ class CoAPServer extends EventEmitter {
         packet.piggybackReplyMs = this._options.piggybackReplyMs
         const generateResponse = (): OutgoingMessage | ObserveStream | undefined => {
             const response = new Message(packet, (response, packet: ParsedPacket) => {
-                /**
-                 * Extended `Buffer` with additional fields for caching.
-                 *
-                 * TODO: Find a more elegant solution for this type.
-                 */
                 let buf: any
-                const sender = new RetrySend(sock, rsinfo.port, rsinfo.address)
+                const sender = new RetrySend(sock, rsinfo.port, rsinfo.address, undefined, this._parameters)
 
                 try {
-                    buf = generate(packet, parameters.maxMessageSize)
+                    buf = generate(packet, this._parameters.maxMessageSize)
                 } catch (err) {
                     response.emit('error', err)
                     return
                 }
-                if (Message === OutMessage) {
-                    sender.on('error', response.emit.bind(response, 'error'))
-                } else {
-                    buf.response = response
-                    sender.on('error', () => {
-                        response.end()
-                    })
+
+                // OSCORE encode response if request was protected
+                if (oscoreProtected && this._oscoreContextManager != null && oscoreSenderId != null) {
+                    const tokenHex = packet.token?.toString('hex')
+                    const oscore = tokenHex != null && tokenHex.length > 0
+                        ? this._oscoreContextManager.getByToken(tokenHex, oscoreSenderId)
+                        : undefined
+
+                    if (oscore != null) {
+                        oscore.encode(buf)
+                            .then((encoded) => {
+                                this._finishSendResponse(
+                                    encoded, response, sender, request,
+                                    packet, lru, Message
+                                )
+                                // Token cleanup
+                                if (Message === OutMessage && this._oscoreContextManager != null && tokenHex != null) {
+                                    this._oscoreContextManager.unbindToken(tokenHex, oscoreSenderId)
+                                }
+                            })
+                            .catch((err) => response.emit('error', err))
+                        // Observe token cleanup on stream close (covers both finish and error)
+                        if (Message === ObserveStream) {
+                            (response as ObserveStream).once('close', () => {
+                                if (tokenHex != null) {
+                                    this._oscoreContextManager?.unbindToken(tokenHex, oscoreSenderId)
+                                }
+                            })
+                        }
+                        return
+                    }
                 }
 
-                const key = this._toKey(
-                    request,
-                    packet,
-                    packet.ack || !packet.confirmable
+                this._finishSendResponse(
+                    buf, response, sender, request,
+                    packet, lru, Message
                 )
-                lru.set(key, buf)
-                buf.sender = sender
-
-                if (
-                    this._options.sendAcksForNonConfirmablePackets === true ||
-                    packet.confirmable
-                ) {
-                    sender.send(
-                        buf,
-                        packet.ack || packet.reset || !packet.confirmable
-                    )
-                } else {
-                    debug('OMIT ACK PACKAGE')
-                }
             })
 
             response.statusCode = '2.05'
             response._request = request._packet
             if (cacheKey != null) {
                 response._cachekey = cacheKey
+            }
+            if (response instanceof OutMessage) {
+                response._maxBlock2 = this._maxBlock2
             }
 
             // inject this function so the response can add an entry to the cache
@@ -599,6 +645,65 @@ class CoAPServer extends EventEmitter {
         this.saveAdditionalBlock2Options(cacheKey, response)
     }
 
+    private _finishSendResponse (
+        buf: any,
+        response: OutgoingMessage | ObserveStream,
+        sender: RetrySend,
+        request: IncomingMessage,
+        packet: ParsedPacket,
+        lru: CoapLRUCache<string, any>,
+        Message: typeof ObserveStream | typeof OutMessage
+    ): void {
+        if (Message === OutMessage) {
+            sender.on('error', response.emit.bind(response, 'error'))
+        } else {
+            buf.response = response
+            sender.on('error', () => {
+                (response as ObserveStream).end()
+            })
+        }
+
+        const key = this._toKey(
+            request,
+            packet,
+            packet.ack || !packet.confirmable
+        )
+        lru.set(key, buf)
+        buf.sender = sender
+
+        if (
+            this._options.sendAcksForNonConfirmablePackets === true ||
+            packet.confirmable
+        ) {
+            const avoidBackoff = packet.ack || packet.reset || !packet.confirmable
+            debug(`Sending packet: ack=${packet.ack}, reset=${packet.reset}, confirmable=${packet.confirmable}, avoidBackoff=${avoidBackoff}, messageId=${packet.messageId}`)
+            sender.send(
+                buf,
+                avoidBackoff
+            )
+        } else {
+            debug('OMIT ACK PACKAGE')
+        }
+    }
+
+    addOscoreContext (instance: OSCORE, recipientId: Buffer, idContext?: Buffer): void {
+        if (this._oscoreContextManager == null) {
+            this._oscoreContextManager = new SecurityContextManager()
+            // Insert OSCORE middleware before handleServerRequest if not already present
+            const hsrIndex = this._middlewares.indexOf(handleServerRequest)
+            if (hsrIndex >= 0) {
+                this._middlewares.splice(hsrIndex, 0, oscoreDecryptRequest)
+            } else {
+                this._middlewares.push(oscoreDecryptRequest)
+            }
+        }
+        this._oscoreContextManager.addContext(instance, recipientId, idContext)
+    }
+
+    removeOscoreContext (recipientId: Buffer, idContext?: Buffer): void {
+        this._oscoreContextManager?.removeContext(recipientId, idContext)
+    }
+
     private saveAdditionalBlock2Options (cacheKey: string | null, response?: OutgoingMessage | ObserveStream): void {
         if (cacheKey != null) {
             const cacheEntry = this._block2Cache.get(cacheKey)
@@ -644,19 +749,6 @@ class CoAPServer extends EventEmitter {
     }
 }
 
-// Max block size defined in the protocol is 2^(6+4) = 1024
-let maxBlock2 = 1024
-
-// Some network stacks (e.g. 6LowPAN/Thread) might have a lower IP MTU.
-// In those cases the maxPayloadSize parameter can be adjusted
-if (parameters.maxPayloadSize < 1024) {
-    // CoAP Block2 header only has sizes of 2^(i+4) for i in 0 to 6 inclusive,
-    // so pick the next size down that is supported
-    let exponent = Math.log2(parameters.maxPayloadSize)
-    exponent = Math.floor(exponent)
-    maxBlock2 = Math.pow(2, exponent)
-}
-
 /*
 new out message
 inherit from OutgoingMessage
@@ -666,6 +758,7 @@ class OutMessage extends OutgoingMessage {
     _cachekey: string
     // eslint-disable-next-line @typescript-eslint/ban-types
     _addCacheEntry: Function
+    _maxBlock2: number
 
     /**
      * Entry point for a response from the server
@@ -676,6 +769,8 @@ class OutMessage extends OutgoingMessage {
     end (payload?: Buffer): this {
         // removeOption(this._request.options, 'Block1');
         // add logic for Block1 sending
+
+        const maxBlock2 = this._maxBlock2
 
         const block2Buff = getOption(this._request.options, 'Block2')
         let requestedBlockOption: Block | null = null
