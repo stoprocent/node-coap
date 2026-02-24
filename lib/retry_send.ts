@@ -9,7 +9,7 @@
 import { EventEmitter } from 'events'
 import { parse } from 'coap-packet'
 import { parameters } from './parameters'
-import { Socket } from 'dgram'
+import type { CoapSocket } from './platform'
 
 class RetrySendError extends Error {
     retransmitTimeout: number
@@ -20,7 +20,7 @@ class RetrySendError extends Error {
 }
 
 export default class RetrySend extends EventEmitter {
-    _sock: Socket
+    _sock: CoapSocket
     _port: number
     _host?: string
     _maxRetransmit: number

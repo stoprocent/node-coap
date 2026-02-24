@@ -7,12 +7,21 @@
  */
 
 import { CoapMethod, OptionName, Packet, ParsedPacket } from 'coap-packet'
-import { Socket } from 'dgram'
-import { AddressInfo } from 'net'
+import type { CoapSocket } from '../lib/platform'
 import Agent from '../lib/agent'
 import IncomingMessage from '../lib/incoming_message'
 import OutgoingMessage from '../lib/outgoing_message'
 import CoAPServer from '../lib/server'
+
+/**
+ * Portable AddressInfo interface.
+ * Matches Node.js net.AddressInfo without requiring the 'net' module.
+ */
+export interface AddressInfo {
+    address: string
+    family: string
+    port: number
+}
 
 export declare function requestListener (req: IncomingMessage, res: OutgoingMessage): void
 
@@ -118,6 +127,6 @@ export interface CoapServerOptions {
 
 export interface AgentOptions {
     type?: 'udp4' | 'udp6'
-    socket?: Socket
+    socket?: CoapSocket
     port?: number
 }

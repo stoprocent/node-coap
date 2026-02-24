@@ -6,9 +6,7 @@
  * See the included LICENSE file for more details.
  */
 
-import crypto = require('crypto')
-import { Socket, createSocket } from 'dgram'
-import { AgentOptions, CoapRequestParams, Block } from '../models/models'
+import { type AgentOptions, type CoapRequestParams, type Block, type AddressInfo } from '../models/models'
 import { EventEmitter } from 'events'
 import { parse, generate, ParsedPacket } from 'coap-packet'
 import IncomingMessage from './incoming_message'
@@ -18,8 +16,8 @@ import RetrySend from './retry_send'
 import { parseBlock2, createBlock2, getOption, removeOption } from './helpers'
 import { SegmentedTransmission } from './segmentation'
 import { parseBlockOption } from './block'
-import { AddressInfo } from 'net'
 import { parameters } from './parameters'
+import { type CoapSocket, createCoapSocket, randomBytes } from './platform'
 
 const maxToken = Math.pow(2, 32)
 const maxMessageId = Math.pow(2, 16)
@@ -27,7 +25,7 @@ const maxMessageId = Math.pow(2, 16)
 class Agent extends EventEmitter {
     _opts: AgentOptions
     _closing: boolean
-    _sock: Socket | null
+    _sock: CoapSocket | null
     _msgIdToReq: Map<number, OutgoingMessage>
     _tkToReq: Map<string, OutgoingMessage>
     _tkToMulticastResAddr: Map<string, string[]>
@@ -57,14 +55,14 @@ class Agent extends EventEmitter {
         this._init(opts.socket)
     }
 
-    _init (socket?: Socket): void {
+    _init (socket?: CoapSocket): void {
         this._closing = false
 
         if (this._sock != null) {
             return
         }
 
-        this._sock = socket ?? createSocket({ type: this._opts.type ?? 'udp4' })
+        this._sock = socket ?? createCoapSocket({ type: this._opts.type ?? 'udp4' })
         this._sock.on('message', (msg, rsinfo) => {
             let packet: ParsedPacket
             try {
@@ -375,7 +373,7 @@ class Agent extends EventEmitter {
         }
 
         buf.writeUInt32BE(this._lastToken, 0)
-        crypto.randomBytes(4).copy(buf, 4)
+        randomBytes(4).copy(buf, 4)
 
         return buf
     }

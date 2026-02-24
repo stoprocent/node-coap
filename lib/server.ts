@@ -7,13 +7,11 @@
  */
 
 import { EventEmitter } from 'events'
-import { isIPv6, type AddressInfo } from 'net'
-import { type CoapServerOptions, type requestListener, type CoapPacket, type Block, type MiddlewareParameters } from '../models/models'
+import { type CoapServerOptions, type requestListener, type CoapPacket, type Block, type MiddlewareParameters, type AddressInfo } from '../models/models'
 import BlockCache from './cache'
 import OutgoingMessage from './outgoing_message'
-import { Socket, createSocket, type SocketOptions } from 'dgram'
+import { type CoapSocket, createCoapSocket, isIPv6, getNetworkAddresses } from './platform'
 import { LRUCache } from 'lru-cache'
-import os from 'os'
 import IncomingMessage from './incoming_message'
 import ObserveStream from './observe_write_stream'
 import RetrySend from './retry_send'
@@ -58,26 +56,8 @@ function removeProxyOptions (packet: CoapPacket): CoapPacket {
     return packet
 }
 
-function allAddresses (type): string[] {
-    let family = 'IPv4'
-    if (type === 'udp6') {
-        family = 'IPv6'
-    }
-    const addresses: string[] = []
-    const macs: string[] = []
-    const interfaces = os.networkInterfaces()
-    for (const ifname in interfaces) {
-        if (ifname in interfaces) {
-            interfaces[ifname]?.forEach((a) => {
-                // Checking for repeating MAC address to avoid trying to listen on same interface twice
-                if (a.family === family && !macs.includes(a.mac)) {
-                    addresses.push(a.address)
-                    macs.push(a.mac)
-                }
-            })
-        }
-    }
-    return addresses
+function allAddresses (type: 'udp4' | 'udp6'): string[] {
+    return getNetworkAddresses(type)
 }
 
 // eslint-disable-next-line @typescript-eslint/ban-types
@@ -102,7 +82,7 @@ class CoAPServer extends EventEmitter {
     // eslint-disable-next-line @typescript-eslint/ban-types
     _block1Cache: BlockCache<Buffer | {}>
     _block2Cache: BlockCache<Block2CacheEntry | null>
-    _sock: Socket | EventEmitter | null
+    _sock: CoapSocket | EventEmitter | null
     _internal_socket: boolean
     _clientIdentifier: (request: IncomingMessage) => string
 
@@ -223,8 +203,8 @@ class CoAPServer extends EventEmitter {
             token: packet != null ? packet.token : undefined
         }, parameters.maxMessageSize)
 
-        if (this._sock instanceof Socket) {
-            this._sock.send(message, 0, message.length, rsinfo.port)
+        if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
+            (this._sock as CoapSocket).send(message, 0, message.length, rsinfo.port)
         }
     }
 
@@ -234,8 +214,8 @@ class CoAPServer extends EventEmitter {
         const port = parseInt(url.port)
         const message = generate(removeProxyOptions(packet), parameters.maxMessageSize)
 
-        if (this._sock instanceof Socket) {
-            this._sock.send(message, port, host, callback)
+        if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
+            (this._sock as CoapSocket).send(message, 0, message.length, port, host, callback)
         }
     }
 
@@ -244,23 +224,33 @@ class CoAPServer extends EventEmitter {
         const port = rsinfo.port
         const message = generate(packet, parameters.maxMessageSize)
 
-        if (this._sock instanceof Socket) {
-            this._sock.send(message, port, host, callback)
+        if (this._sock != null && typeof (this._sock as CoapSocket).send === 'function') {
+            (this._sock as CoapSocket).send(message, 0, message.length, port, host, callback)
         }
     }
 
-    private generateSocket (address: string | undefined, port: number, done?: (err?: Error) => void): Socket {
-        const socketOptions: SocketOptions = {
-            type: this._options.type ?? 'udp4',
+    private generateSocket (address: string | undefined, port: number, done?: (err?: Error) => void): CoapSocket {
+        const socketOptions = {
+            type: this._options.type ?? 'udp4' as const,
             reuseAddr: this._options.reuseAddr
         }
-        const sock = createSocket(socketOptions)
+        const sock = createCoapSocket(socketOptions)
 
         sock.bind(port, address, () => {
             try {
                 if (this._multicastAddress != null) {
                     const multicastAddress = this._multicastAddress
-                    sock.setMulticastLoopback(true)
+                    if (typeof sock.setMulticastLoopback === 'function') {
+                        sock.setMulticastLoopback(true)
+                    }
+
+                    if (typeof sock.addMembership !== 'function') {
+                        // Socket does not support multicast (e.g. React Native)
+                        if (done != null) {
+                            done()
+                        }
+                        return
+                    }
 
                     if (this._multicastInterface != null) {
                         sock.addMembership(
@@ -271,7 +261,7 @@ class CoAPServer extends EventEmitter {
                         allAddresses(this._options.type).forEach((
                             _interface
                         ) => {
-                            sock.addMembership(
+                            sock.addMembership!(
                                 multicastAddress,
                                 _interface
                             )
@@ -279,7 +269,7 @@ class CoAPServer extends EventEmitter {
                     } else {
                         // FIXME: Iterating over all network interfaces does not
                         //        work for IPv6 at the moment
-                        sock.addMembership(multicastAddress)
+                        sock.addMembership!(multicastAddress)
                     }
                 }
             } catch (err) {
@@ -376,8 +366,8 @@ class CoAPServer extends EventEmitter {
         }
 
         if (this._sock != null) {
-            if (this._internal_socket && this._sock instanceof Socket) {
-                this._sock.close()
+            if (this._internal_socket && typeof (this._sock as CoapSocket).close === 'function') {
+                (this._sock as CoapSocket).close()
             }
             this._lru.clear()
             this._sock = null
@@ -414,8 +404,8 @@ class CoAPServer extends EventEmitter {
         const request = new IncomingMessage(packet, rsinfo)
         const cached = lru.peek(this._toKey(request, packet, true))
 
-        if (cached != null && !(packet.ack ?? false) && !(packet.reset ?? false) && sock instanceof Socket) {
-            sock.send(cached, 0, cached.length, rsinfo.port, rsinfo.address)
+        if (cached != null && !(packet.ack ?? false) && !(packet.reset ?? false) && sock != null && typeof (sock as CoapSocket).send === 'function') {
+            (sock as CoapSocket).send(cached, 0, cached.length, rsinfo.port, rsinfo.address)
             return
         } else if (cached != null && ((packet.ack ?? false) || (packet.reset ?? false))) {
             if (cached.response != null && (packet.reset ?? false)) {

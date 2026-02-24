@@ -7,7 +7,7 @@
  */
 
 import type { CoapMethod, OptionName } from 'coap-packet'
-import type { AddressInfo } from 'net'
+import type { AddressInfo } from '../models/models'
 import { Readable } from 'readable-stream'
 import type { ReadableOptions } from 'readable-stream'
 import type { CoapPacket, OptionValue } from '../models/models'

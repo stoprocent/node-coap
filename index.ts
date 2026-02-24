@@ -13,9 +13,10 @@ import OutgoingMessage from './lib/outgoing_message'
 import ObserveReadStream from './lib/observe_read_stream'
 import ObserveWriteStream from './lib/observe_write_stream'
 import { parameters, refreshTiming, defaultTiming } from './lib/parameters'
-import { isIPv6 } from 'net'
+import { isIPv6, setTransportProvider, setRandomBytesProvider } from './lib/platform'
 import { registerOption, registerFormat, ignoreOption } from './lib/option_converter'
 import type { CoapServerOptions, requestListener, CoapRequestParams, ParametersUpdate, AgentOptions, CoapPacket, Option, OptionValue } from './models/models'
+import type { CoapSocket, TransportProvider, RandomBytesProvider } from './lib/platform'
 
 export let globalAgent = new Agent({ type: 'udp4' })
 export let globalAgentIPv6 = new Agent({ type: 'udp6' })
@@ -98,11 +99,16 @@ export {
     ObserveWriteStream,
     Agent,
     Server,
+    setTransportProvider,
+    setRandomBytesProvider,
     type ParametersUpdate,
     type CoapRequestParams,
     type AgentOptions,
     type CoapPacket,
     type Option,
     type OptionValue,
-    type CoapServerOptions
+    type CoapServerOptions,
+    type CoapSocket,
+    type TransportProvider,
+    type RandomBytesProvider
 }

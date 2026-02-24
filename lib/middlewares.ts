@@ -6,10 +6,10 @@
  * See the included LICENSE file for more details.
  */
 
-import crypto from 'crypto'
 import { parse, ParsedPacket } from 'coap-packet'
 import { or, isOption } from './helpers'
 import { MiddlewareParameters } from '../models/models'
+import { randomBytes } from './platform'
 
 type middlewareCallback = (nullOrError: null | Error) => void
 
@@ -66,7 +66,7 @@ export function proxyRequest (request: MiddlewareParameters, next: middlewareCal
 
     if (request.proxy != null) {
         if (request.packet.token.length === 0) {
-            request.packet.token = crypto.randomBytes(8)
+            request.packet.token = randomBytes(8)
         }
 
         request.server._proxiedRequests.set(request.packet.token.toString('hex'), request)

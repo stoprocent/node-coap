@@ -6,7 +6,7 @@
  * See the included LICENSE file for more details.
  */
 
-import { AddressInfo } from 'net'
+import type { AddressInfo } from '../models/models'
 import IncomingMessage from './incoming_message'
 import { packetToMessage } from './helpers'
 import { CoapPacket } from '../models/models'

@@ -7,7 +7,7 @@
  */
 
 import { OptionName, Packet } from 'coap-packet'
-import { Writable } from 'stream'
+import { Writable } from 'readable-stream'
 import { CoapPacket, OptionValue } from '../models/models'
 import { setOption } from './helpers'
 
