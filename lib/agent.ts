@@ -447,9 +447,13 @@ class Agent extends EventEmitter {
                     const retryUrl = { ...req.url, token: req._packet.token }
                     const retryReq = this.request(retryUrl)
 
-                    // Carry over options from original packet (Content-Format, Accept, custom, etc.)
-                    // Skip Uri-Path, Uri-Query, Observe — these are reconstructed from retryUrl by request()
-                    const skipOptions = new Set(['Uri-Path', 'Uri-Query', 'Observe'])
+                    // Carry over options from original packet (Content-Format, Accept,
+                    // Uri-Query, custom, etc.). Skip only Uri-Path and Observe — those
+                    // are reconstructed from retryUrl by request() (via url.pathname /
+                    // url.observe). Uri-Query has no such reconstruction path: it is
+                    // only ever set via setOption() on the original request, so it
+                    // must be copied here or the retry silently loses it (GWLB-2727).
+                    const skipOptions = new Set(['Uri-Path', 'Observe'])
                     if (req._packet.options != null) {
                         for (const opt of req._packet.options) {
                             if (!skipOptions.has(String(opt.name))) {
