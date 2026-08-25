@@ -1309,4 +1309,104 @@ describe('OSCORE', function () {
             })
         }).timeout(2000)
     })
+
+    describe('client-side Echo auto-retry', function () {
+        it('should preserve Uri-Query options when auto-retrying after a 4.01 Echo challenge (GWLB-2727)', function (done) {
+            const port = nextPort()
+            const { client: clientOscore, server: serverOscore } = createOscorePair()
+
+            const fakeServer = dgram.createSocket('udp4')
+            let requestCount = 0
+            let finished = false
+            const finish = (err?: Error): void => {
+                if (finished) return
+                finished = true
+                try { fakeServer.close() } catch {}
+                done(err)
+            }
+
+            fakeServer.on('message', (msg, rinfo) => {
+                serverOscore.decode(msg).then(async (decoded) => {
+                    requestCount++
+                    const innerReq = parse(decoded)
+                    const outerReq = parse(msg)
+                    const uriQuery = innerReq.options.find((opt) => opt.name === 'Uri-Query')
+
+                    if (requestCount === 1) {
+                        // Sanity check: the original request must carry the Uri-Query
+                        // the client set before we can meaningfully assert it survives
+                        // the retry.
+                        if (uriQuery == null || uriQuery.value.toString() !== 'tu=abc123') {
+                            finish(new Error(`first request missing Uri-Query, got: ${JSON.stringify(innerReq.options)}`))
+                            return
+                        }
+
+                        // Issue a 4.01 + Echo freshness challenge (RFC 8613 Appendix
+                        // B.1.2 / RFC 9175) — the agent should transparently retry.
+                        const echoNonce = Buffer.from('aabbccddeeff0011', 'hex')
+                        const challenge = generate({
+                            code: '4.01',
+                            ack: innerReq.confirmable,
+                            messageId: outerReq.messageId,
+                            token: innerReq.token,
+                            options: [{ name: '252' as any, value: echoNonce }]
+                        })
+                        const encryptedChallenge = await serverOscore.encode(challenge)
+                        fakeServer.send(encryptedChallenge, 0, encryptedChallenge.length, rinfo.port, rinfo.address)
+                        return
+                    }
+
+                    // Second request: the agent's transparent Echo auto-retry. It
+                    // must still carry the original Uri-Query — GWLB-2727 is the
+                    // agent dropping it here.
+                    if (uriQuery == null) {
+                        finish(new Error('retry request dropped the Uri-Query option (GWLB-2727)'))
+                        return
+                    }
+                    if (uriQuery.value.toString() !== 'tu=abc123') {
+                        finish(new Error(`retry Uri-Query value changed, got: ${uriQuery.value.toString()}`))
+                        return
+                    }
+
+                    const response = generate({
+                        code: '2.05',
+                        ack: innerReq.confirmable,
+                        messageId: outerReq.messageId,
+                        token: innerReq.token,
+                        payload: Buffer.from('ok-after-echo')
+                    })
+                    const encryptedResponse = await serverOscore.encode(response)
+                    fakeServer.send(encryptedResponse, 0, encryptedResponse.length, rinfo.port, rinfo.address)
+                }).catch((err) => {
+                    finish(err as Error)
+                })
+            })
+
+            fakeServer.bind(port, () => {
+                const agent = trackAgent(new Agent({ type: 'udp4' }))
+                agent.addOscoreContext('127.0.0.1', port, clientOscore)
+
+                const req = request({
+                    hostname: '127.0.0.1',
+                    port,
+                    pathname: '/test',
+                    agent
+                })
+                req.setOption('Uri-Query', Buffer.from('tu=abc123'))
+                req.on('error', (err) => {
+                    finish(new Error(`request errored unexpectedly: ${err.message}`))
+                })
+                req.on('response', (res) => {
+                    try {
+                        expect(res.payload.toString()).to.equal('ok-after-echo')
+                        expect(requestCount).to.equal(2)
+                        finish()
+                    } catch (e) {
+                        finish(e as Error)
+                    }
+                })
+                req.end()
+            })
+        }).timeout(2000)
+    })
 })
